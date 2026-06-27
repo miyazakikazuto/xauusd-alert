@@ -90,18 +90,31 @@ CONFIG = {
 
 # ─── DATA FETCHER ─────────────────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
-    """Ambil data OHLCV dari Yahoo Finance"""
+    """Ambil data OHLCV dari Stooq (tidak butuh API key)"""
     log.info(f"Fetching data: {symbol} | TF: {timeframe} | Bars: {bars}")
     
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period="30d", interval=timeframe)
+    import urllib.request
+    
+    # Stooq - reliable, gratis, tanpa API key
+    url = "https://stooq.com/q/d/l/?s=xauusd&i=h"
+    
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0"
+    })
+    
+    from io import StringIO
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        content = resp.read().decode("utf-8")
+    
+    df = pd.read_csv(StringIO(content))
+    df.columns = [c.lower() for c in df.columns]
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    df = df[["open", "high", "low", "close", "volume"]].dropna()
+    df = df.tail(bars)
     
     if df.empty:
-        raise ValueError(f"Data kosong untuk {symbol}")
-    
-    df = df.tail(bars).copy()
-    df.columns = [c.lower() for c in df.columns]
-    df = df[["open", "high", "low", "close", "volume"]].dropna()
+        raise ValueError(f"Data kosong dari Stooq")
     
     log.info(f"Data berhasil: {len(df)} candle | Terakhir: {df.index[-1]}")
     return df
