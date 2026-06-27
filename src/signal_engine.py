@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 
 # ─── KONFIGURASI ──────────────────────────────────────────────────────────────
 CONFIG = {
-    "symbol"         : "GC=F",        # Gold Futures (proxy XAU/USD)
+    "symbol"         : "XAUUSD=X",        # Gold Futures (proxy XAU/USD)
     "symbol_display" : "XAU/USD",
     "timeframe"      : "1h",          # H1 untuk hold 4 jam
     "lookback_bars"  : 200,           # Candle historis untuk kalkulasi
