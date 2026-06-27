@@ -485,13 +485,9 @@ def main():
     if signal["signal"] != "WAIT":
         log.info(f"Entry: ${signal['entry']:,.2f} | SL: ${signal['stop_loss']:,.2f} | TP: ${signal['take_profit']:,.2f}")
         log.info(f"R:R Ratio: 1:{risk.get('rr_ratio', 0):.1f}")
-        
-        # 5. Kirim alert
-if signal["signal"] != "WAIT":
+    
+    # 5. Kirim alert — selalu kirim apapun sinyalnya
     send_telegram_alert(signal, risk)
-else:
-    # TAMBAHKAN INI — kirim status WAIT juga
-    send_telegram_wait(signal)
     
     # 6. Simpan log
     save_signal_log(signal, risk, market_status)
