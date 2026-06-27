@@ -90,35 +90,62 @@ CONFIG = {
 
 # ─── DATA FETCHER ─────────────────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
-    """Ambil data OHLCV dari Stooq (tidak butuh API key)"""
+    """Ambil data OHLCV dari Stooq"""
     log.info(f"Fetching data: {symbol} | TF: {timeframe} | Bars: {bars}")
     
     import urllib.request
-    
-    # Stooq - reliable, gratis, tanpa API key
-    url = "https://stooq.com/q/d/l/?s=xauusd&i=h"
-    
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0"
-    })
-    
     from io import StringIO
+    
+    url = "https://stooq.com/q/d/l/?s=xauusd&i=h"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    
     with urllib.request.urlopen(req, timeout=30) as resp:
         content = resp.read().decode("utf-8")
     
+    log.info(f"Raw CSV preview: {content[:200]}")
+    
     df = pd.read_csv(StringIO(content))
-    df.columns = [c.lower() for c in df.columns]
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.set_index("date").sort_index()
-    df = df[["open", "high", "low", "close", "volume"]].dropna()
-    df = df.tail(bars)
+    log.info(f"Kolom yang ada: {list(df.columns)}")
+    log.info(f"5 baris pertama:\n{df.head()}")
+    
+    # Lowercase semua kolom
+    df.columns = [c.lower().strip() for c in df.columns]
+    log.info(f"Kolom setelah lowercase: {list(df.columns)}")
+    
+    # Cari kolom tanggal (bisa 'date' atau lainnya)
+    date_col = None
+    for col in df.columns:
+        if "date" in col or "time" in col:
+            date_col = col
+            break
+    
+    if date_col is None:
+        # Pakai kolom pertama sebagai index
+        date_col = df.columns[0]
+    
+    log.info(f"Menggunakan kolom tanggal: {date_col}")
+    
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.set_index(date_col).sort_index()
+    
+    # Pastikan kolom OHLCV ada
+    df = df.rename(columns={
+        "open": "open", "high": "high",
+        "low": "low",   "close": "close",
+        "vol": "volume", "volume": "volume"
+    })
+    
+    cols = [c for c in ["open","high","low","close","volume"] if c in df.columns]
+    df = df[cols].dropna().tail(bars)
+    
+    if "volume" not in df.columns:
+        df["volume"] = 1000
     
     if df.empty:
-        raise ValueError(f"Data kosong dari Stooq")
+        raise ValueError("Data kosong dari Stooq")
     
     log.info(f"Data berhasil: {len(df)} candle | Terakhir: {df.index[-1]}")
     return df
-
 
 # ─── INDIKATOR ENGINE ─────────────────────────────────────────────────────────
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
