@@ -90,59 +90,49 @@ CONFIG = {
 
 # ─── DATA FETCHER ─────────────────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
-    """Ambil data OHLCV dari Stooq"""
-    log.info(f"Fetching data: {symbol} | TF: {timeframe} | Bars: {bars}")
+    """Ambil data OHLCV dari Twelve Data API (gratis, reliable)"""
+    log.info(f"Fetching data: XAU/USD | TF: {timeframe} | Bars: {bars}")
     
-    import urllib.request
-    from io import StringIO
+    api_key = os.environ.get("TWELVEDATA_API_KEY", "demo")
     
-    url = "https://stooq.com/q/d/l/?s=xauusd&i=h"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    url = (
+        f"https://api.twelvedata.com/time_series"
+        f"?symbol=XAU/USD"
+        f"&interval=1h"
+        f"&outputsize={bars}"
+        f"&apikey={api_key}"
+    )
     
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        content = resp.read().decode("utf-8")
+    resp = requests.get(url, timeout=30)
+    data = resp.json()
     
-    log.info(f"Raw CSV preview: {content[:200]}")
+    if "values" not in data:
+        raise ValueError(f"API error: {data.get('message', data)}")
     
-    df = pd.read_csv(StringIO(content))
-    log.info(f"Kolom yang ada: {list(df.columns)}")
-    log.info(f"5 baris pertama:\n{df.head()}")
-    
-    # Lowercase semua kolom
-    df.columns = [c.lower().strip() for c in df.columns]
-    log.info(f"Kolom setelah lowercase: {list(df.columns)}")
-    
-    # Cari kolom tanggal (bisa 'date' atau lainnya)
-    date_col = None
-    for col in df.columns:
-        if "date" in col or "time" in col:
-            date_col = col
-            break
-    
-    if date_col is None:
-        # Pakai kolom pertama sebagai index
-        date_col = df.columns[0]
-    
-    log.info(f"Menggunakan kolom tanggal: {date_col}")
-    
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.set_index(date_col).sort_index()
-    
-    # Pastikan kolom OHLCV ada
+    rows = data["values"]
+    df = pd.DataFrame(rows)
     df = df.rename(columns={
+        "datetime": "date",
         "open": "open", "high": "high",
         "low": "low",   "close": "close",
-        "vol": "volume", "volume": "volume"
+        "volume": "volume"
     })
     
-    cols = [c for c in ["open","high","low","close","volume"] if c in df.columns]
-    df = df[cols].dropna().tail(bars)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col])
     
     if "volume" not in df.columns:
         df["volume"] = 1000
+    else:
+        df["volume"] = pd.to_numeric(df["volume"])
+    
+    df = df[["open","high","low","close","volume"]].dropna()
     
     if df.empty:
-        raise ValueError("Data kosong dari Stooq")
+        raise ValueError("Data kosong dari Twelve Data")
     
     log.info(f"Data berhasil: {len(df)} candle | Terakhir: {df.index[-1]}")
     return df
