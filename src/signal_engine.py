@@ -361,7 +361,7 @@ def calculate_risk_metrics(signal: dict) -> dict:
 
 # ─── TELEGRAM ALERT ───────────────────────────────────────────────────────────
 def send_telegram_alert(signal: dict, risk: dict) -> bool:
-    """Kirim alert ke Telegram"""
+    """Kirim alert ke Telegram — BUY, SELL, dan WAIT"""
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id   = os.environ.get("TELEGRAM_CHAT_ID")
     
@@ -388,10 +388,9 @@ def send_telegram_alert(signal: dict, risk: dict) -> bool:
 📊 *Instrumen:* {CONFIG['symbol_display']} (H1)
 💡 *Sinyal:* `{s}`
 🎯 *Kekuatan:* {signal['score']}/{signal['score_max']} poin
-
 💰 *HARGA SEKARANG: ${signal['price']:,.2f}*
 """
-    
+
     if s in ["BUY", "SELL"]:
         direction_arrow = "⬆️" if s == "BUY" else "⬇️"
         msg += f"""
@@ -488,9 +487,11 @@ def main():
         log.info(f"R:R Ratio: 1:{risk.get('rr_ratio', 0):.1f}")
         
         # 5. Kirim alert
-        send_telegram_alert(signal, risk)
-    else:
-        log.info("Tidak ada sinyal kuat. Menunggu setup yang lebih baik...")
+if signal["signal"] != "WAIT":
+    send_telegram_alert(signal, risk)
+else:
+    # TAMBAHKAN INI — kirim status WAIT juga
+    send_telegram_wait(signal)
     
     # 6. Simpan log
     save_signal_log(signal, risk, market_status)
