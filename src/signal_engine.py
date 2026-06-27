@@ -413,9 +413,6 @@ def send_telegram_alert(signal: dict, risk: dict) -> bool:
   • Volume: `{signal['indicators']['vol_ratio']:.2f}x` rata-rata
   • ATR   : `{signal['atr']:.2f}`
 
-⚠️ _Ini bukan saran keuangan. Selalu gunakan manajemen risiko yang baik._
-"""
-
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         resp = requests.post(url, json={
