@@ -412,7 +412,7 @@ def send_telegram_alert(signal: dict, risk: dict) -> bool:
   • MACD  : `{signal['indicators']['macd_hist']:+.3f}` (histogram)
   • Volume: `{signal['indicators']['vol_ratio']:.2f}x` rata-rata
   • ATR   : `{signal['atr']:.2f}`
-
+"""
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         resp = requests.post(url, json={
