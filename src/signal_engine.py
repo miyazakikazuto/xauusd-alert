@@ -1,35 +1,17 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║          XAUUSD TRADING ALERT - SIGNAL ENGINE v1.0              ║
+║          XAUUSD TRADING ALERT - SIGNAL ENGINE v2.0              ║
 ║          Strategi: Multi-Indicator H1 → Hold 4 Jam              ║
 ║          Author: AI Trading System                               ║
+║          v2.0: State Persistence via GitHub Gist                ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-STRATEGI TRADING (Hold 4 Jam):
+PERUBAHAN v2.0:
 ================================
-Timeframe Analisis : H1 (1-Jam) sebagai trigger sinyal
-Hold Duration     : ±4 jam (2-4 candle H1)
-Instrumen        : XAU/USD (Gold)
-
-INDIKATOR YANG DIGUNAKAN:
---------------------------
-1. EMA 9 & EMA 21   → Trend Direction (Fast Cross)
-2. EMA 50           → Trend Filter (hanya trade searah trend)
-3. RSI (14)         → Momentum & Overbought/Oversold
-4. MACD (12,26,9)   → Konfirmasi momentum & divergensi
-5. Bollinger Bands  → Volatility & mean reversion
-6. ATR (14)         → Kalkulasi SL & TP dinamis
-7. Volume           → Konfirmasi kekuatan candle
-
-ATURAN ENTRY:
--------------
-BUY  : EMA9 > EMA21 > EMA50 + RSI antara 50-70 + MACD bullish cross
-SELL : EMA9 < EMA21 < EMA50 + RSI antara 30-50 + MACD bearish cross
-
-RISK MANAGEMENT (4 Jam Hold):
-------------------------------
-Stop Loss  : 1.5x ATR14
-Take Profit: 3.0x ATR14  (Risk:Reward = 1:2)
+- State persistence via GitHub Gist
+- Alert hanya dikirim saat sinyal BERUBAH
+- WAIT → tidak spam, hanya kirim sekali saat transisi ke WAIT
+- BUY/SELL → kirim saat pertama muncul + update entry price jika berubah signifikan
 """
 
 import os
@@ -60,37 +42,205 @@ log = logging.getLogger(__name__)
 
 # ─── KONFIGURASI ──────────────────────────────────────────────────────────────
 CONFIG = {
-    "symbol"         : "XAUUSD=X",        # Gold Futures (proxy XAU/USD)
+    "symbol"         : "XAUUSD=X",
     "symbol_display" : "XAU/USD",
-    "timeframe"      : "1h",          # H1 untuk hold 4 jam
-    "lookback_bars"  : 200,           # Candle historis untuk kalkulasi
+    "timeframe"      : "1h",
+    "lookback_bars"  : 200,
 
-    # Indikator
     "ema_fast"       : 9,
     "ema_mid"        : 21,
     "ema_slow"       : 50,
     "rsi_period"     : 14,
-    "rsi_ob"         : 70,            # Overbought
-    "rsi_os"         : 30,            # Oversold
+    "rsi_ob"         : 70,
+    "rsi_os"         : 30,
     "bb_period"      : 20,
     "bb_std"         : 2,
     "atr_period"     : 14,
 
-    # Risk Management (4 jam hold)
-    "sl_multiplier"  : 1.5,           # SL = 1.5x ATR
-    "tp_multiplier"  : 3.0,           # TP = 3.0x ATR (R:R = 1:2)
+    "sl_multiplier"  : 1.5,
+    "tp_multiplier"  : 3.0,
 
-    # Kualitas sinyal minimum (dari 10)
     "min_score"      : 6,
 
-    # Jam trading aktif (UTC) - London + NY session
-    "active_hours_utc": list(range(7, 21)),  # 07:00 - 21:00 UTC
+    "active_hours_utc": list(range(7, 21)),
+
+    # State persistence
+    # Nama file di dalam Gist (bebas, tapi harus konsisten)
+    "gist_filename"  : "xauusd_last_signal.json",
+    
+    # Threshold harga berubah untuk re-alert BUY/SELL yang sama
+    # Contoh: 5.0 = kalau harga bergerak >$5 dari entry awal, kirim ulang
+    "price_change_threshold": 5.0,
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STATE MANAGER — GitHub Gist
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _gist_headers() -> dict:
+    """Header auth untuk GitHub API"""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def load_last_state() -> dict:
+    """
+    Ambil state terakhir dari GitHub Gist.
+    Return dict kosong kalau belum ada / error.
+    
+    State format:
+    {
+        "signal": "BUY" | "SELL" | "WAIT",
+        "entry": 3050.00,
+        "score": 7,
+        "timestamp": "2025-01-01T10:00:00"
+    }
+    """
+    gist_id = os.environ.get("STATE_GIST_ID", "")
+    
+    if not gist_id:
+        log.warning("STATE_GIST_ID tidak diset — state persistence dinonaktifkan, selalu kirim alert")
+        return {}
+    
+    try:
+        resp = requests.get(
+            f"https://api.github.com/gists/{gist_id}",
+            headers=_gist_headers(),
+            timeout=10
+        )
+        
+        if resp.status_code == 404:
+            log.info("Gist tidak ditemukan — state kosong (pertama kali run)")
+            return {}
+        
+        resp.raise_for_status()
+        gist_data = resp.json()
+        
+        filename = CONFIG["gist_filename"]
+        if filename not in gist_data["files"]:
+            log.info(f"File '{filename}' belum ada di Gist — state kosong")
+            return {}
+        
+        content = gist_data["files"][filename]["content"]
+        state = json.loads(content)
+        log.info(f"State loaded: sinyal={state.get('signal')} | entry={state.get('entry')}")
+        return state
+        
+    except Exception as e:
+        log.error(f"Gagal load state dari Gist: {e}")
+        return {}
+
+
+def save_current_state(signal: dict) -> bool:
+    """
+    Simpan state sinyal terkini ke GitHub Gist.
+    Kalau Gist ID belum ada, buat Gist baru dan print ID-nya.
+    """
+    gist_id = os.environ.get("STATE_GIST_ID", "")
+    
+    state = {
+        "signal"    : signal["signal"],
+        "entry"     : signal.get("entry"),
+        "score"     : signal.get("score"),
+        "price"     : signal.get("price"),
+        "timestamp" : datetime.now(pytz.utc).isoformat(),
+    }
+    
+    payload = {
+        "description": "XAUUSD Signal State — Auto Updated",
+        "public": False,
+        "files": {
+            CONFIG["gist_filename"]: {
+                "content": json.dumps(state, indent=2)
+            }
+        }
+    }
+    
+    try:
+        if gist_id:
+            # Update Gist yang sudah ada
+            resp = requests.patch(
+                f"https://api.github.com/gists/{gist_id}",
+                headers=_gist_headers(),
+                json=payload,
+                timeout=10
+            )
+        else:
+            # Buat Gist baru (pertama kali setup)
+            resp = requests.post(
+                "https://api.github.com/gists",
+                headers=_gist_headers(),
+                json=payload,
+                timeout=10
+            )
+            if resp.status_code == 201:
+                new_id = resp.json()["id"]
+                log.info(f"✅ Gist baru dibuat! ID: {new_id}")
+                log.info(f"   → Tambahkan STATE_GIST_ID={new_id} ke GitHub Secrets")
+        
+        if resp.status_code in [200, 201]:
+            log.info(f"✅ State berhasil disimpan: {state['signal']}")
+            return True
+        else:
+            log.error(f"Gagal simpan state: {resp.status_code} | {resp.text}")
+            return False
+            
+    except Exception as e:
+        log.error(f"Error simpan state: {e}")
+        return False
+
+
+def should_send_alert(current_signal: dict, last_state: dict) -> tuple[bool, str]:
+    """
+    Logika kapan alert dikirim:
+    
+    KIRIM jika:
+    1. Belum pernah ada state (pertama kali run)
+    2. Sinyal berubah: WAIT→BUY, BUY→SELL, SELL→WAIT, dll
+    3. Sinyal sama BUY/SELL tapi harga bergerak > threshold dari entry awal
+    
+    SKIP jika:
+    1. WAIT→WAIT (tidak ada yang berubah)
+    2. BUY→BUY dan harga tidak bergerak signifikan
+    3. SELL→SELL dan harga tidak bergerak signifikan
+    """
+    current = current_signal["signal"]
+    
+    # Kondisi 1: Tidak ada state sebelumnya
+    if not last_state:
+        return True, "Pertama kali run — kirim initial state"
+    
+    last = last_state.get("signal", "")
+    
+    # Kondisi 2: Sinyal berubah
+    if current != last:
+        return True, f"Sinyal berubah: {last} → {current}"
+    
+    # Kondisi 3: Sinyal sama BUY/SELL, cek apakah harga bergerak signifikan
+    if current in ["BUY", "SELL"]:
+        last_entry = last_state.get("entry") or last_state.get("price", 0)
+        current_price = current_signal.get("price", 0)
+        
+        if last_entry and current_price:
+            price_diff = abs(current_price - last_entry)
+            threshold = CONFIG["price_change_threshold"]
+            
+            if price_diff >= threshold:
+                return True, f"Harga bergerak ${price_diff:.1f} dari entry awal (threshold: ${threshold})"
+    
+    # Default: skip
+    reason = f"Sinyal tetap {current} — tidak ada perubahan signifikan"
+    return False, reason
 
 
 # ─── DATA FETCHER ─────────────────────────────────────────────────────────────
 def fetch_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
-    """Ambil data OHLCV dari Twelve Data API (gratis, reliable)"""
+    """Ambil data OHLCV dari Twelve Data API"""
     log.info(f"Fetching data: XAU/USD | TF: {timeframe} | Bars: {bars}")
     
     api_key = os.environ.get("TWELVEDATA_API_KEY", "demo")
@@ -137,25 +287,22 @@ def fetch_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     log.info(f"Data berhasil: {len(df)} candle | Terakhir: {df.index[-1]}")
     return df
 
+
 # ─── INDIKATOR ENGINE ─────────────────────────────────────────────────────────
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Hitung semua indikator teknikal"""
     
-    # ── EMA (Trend Direction) ──────────────────────────────────────
     df["ema9"]  = ta.trend.EMAIndicator(df["close"], window=CONFIG["ema_fast"]).ema_indicator()
     df["ema21"] = ta.trend.EMAIndicator(df["close"], window=CONFIG["ema_mid"]).ema_indicator()
     df["ema50"] = ta.trend.EMAIndicator(df["close"], window=CONFIG["ema_slow"]).ema_indicator()
     
-    # ── RSI (Momentum) ─────────────────────────────────────────────
     df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=CONFIG["rsi_period"]).rsi()
     
-    # ── MACD (Konfirmasi momentum) ─────────────────────────────────
     macd_obj = ta.trend.MACD(df["close"])
     df["macd"]        = macd_obj.macd()
     df["macd_signal"] = macd_obj.macd_signal()
     df["macd_hist"]   = macd_obj.macd_diff()
     
-    # ── Bollinger Bands (Volatility) ───────────────────────────────
     bb = ta.volatility.BollingerBands(
         df["close"], 
         window=CONFIG["bb_period"], 
@@ -164,34 +311,28 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_upper"] = bb.bollinger_hband()
     df["bb_mid"]   = bb.bollinger_mavg()
     df["bb_lower"] = bb.bollinger_lband()
-    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_mid"] * 100  # %
+    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_mid"] * 100
     
-    # ── ATR (Risk Management) ──────────────────────────────────────
     df["atr"] = ta.volatility.AverageTrueRange(
         df["high"], df["low"], df["close"],
         window=CONFIG["atr_period"]
     ).average_true_range()
     
-    # ── Volume MA ──────────────────────────────────────────────────
-    df["vol_ma"] = df["volume"].rolling(window=20).mean()
+    df["vol_ma"]    = df["volume"].rolling(window=20).mean()
     df["vol_ratio"] = df["volume"] / df["vol_ma"]
     
-    # ── Candle Patterns ────────────────────────────────────────────
-    df["candle_body"] = abs(df["close"] - df["open"])
+    df["candle_body"]  = abs(df["close"] - df["open"])
     df["candle_range"] = df["high"] - df["low"]
-    df["is_bullish"] = df["close"] > df["open"]
+    df["is_bullish"]   = df["close"] > df["open"]
     
     return df.dropna()
 
 
 # ─── SIGNAL ANALYZER ──────────────────────────────────────────────────────────
 def analyze_signal(df: pd.DataFrame) -> dict:
-    """
-    Scoring System (0-10):
-    Setiap kondisi memberikan poin. Total >= 6 = sinyal valid
-    """
-    c = df.iloc[-1]   # Candle terkini
-    p = df.iloc[-2]   # Candle sebelumnya
+    """Scoring System (0-10)"""
+    c = df.iloc[-1]
+    p = df.iloc[-2]
     
     result = {
         "timestamp"    : str(df.index[-1]),
@@ -219,70 +360,54 @@ def analyze_signal(df: pd.DataFrame) -> dict:
         }
     }
 
-    # ═══════════════════════════════════════════════════════════════
-    #  SCORING BUY CONDITIONS
-    # ═══════════════════════════════════════════════════════════════
+    # ── BUY SCORING ───────────────────────────────────────────────
     buy_score = 0
     buy_conditions = {}
 
-    # [BUY 1] EMA Stack Bullish (EMA9 > EMA21 > EMA50)  → 3 poin
     ema_bull = c["ema9"] > c["ema21"] > c["ema50"]
     buy_conditions["EMA Stack Bullish"] = "✅" if ema_bull else "❌"
     if ema_bull: buy_score += 3
 
-    # [BUY 2] EMA9 cross EMA21 bullish baru  → 2 poin bonus
     ema_cross_bull = (c["ema9"] > c["ema21"]) and (p["ema9"] <= p["ema21"])
     buy_conditions["EMA9 Cross EMA21 Baru"] = "✅" if ema_cross_bull else "⚪"
     if ema_cross_bull: buy_score += 2
 
-    # [BUY 3] RSI di zona bullish (50-70)  → 2 poin
     rsi_bull = 50 <= c["rsi"] <= CONFIG["rsi_ob"]
     buy_conditions["RSI Zona Bullish (50-70)"] = "✅" if rsi_bull else "❌"
     if rsi_bull: buy_score += 2
 
-    # [BUY 4] MACD Histogram positif & naik  → 2 poin
     macd_bull = c["macd_hist"] > 0 and c["macd_hist"] > p["macd_hist"]
     buy_conditions["MACD Histogram Bullish"] = "✅" if macd_bull else "❌"
     if macd_bull: buy_score += 2
 
-    # [BUY 5] Volume konfirmasi (vol_ratio > 1.2)  → 1 poin
     vol_ok = c["vol_ratio"] > 1.2
     buy_conditions["Volume Konfirmasi"] = "✅" if vol_ok else "⚪"
     if vol_ok: buy_score += 1
 
-    # ═══════════════════════════════════════════════════════════════
-    #  SCORING SELL CONDITIONS
-    # ═══════════════════════════════════════════════════════════════
+    # ── SELL SCORING ──────────────────────────────────────────────
     sell_score = 0
     sell_conditions = {}
 
-    # [SELL 1] EMA Stack Bearish (EMA9 < EMA21 < EMA50)  → 3 poin
     ema_bear = c["ema9"] < c["ema21"] < c["ema50"]
     sell_conditions["EMA Stack Bearish"] = "✅" if ema_bear else "❌"
     if ema_bear: sell_score += 3
 
-    # [SELL 2] EMA9 cross EMA21 bearish baru  → 2 poin bonus
     ema_cross_bear = (c["ema9"] < c["ema21"]) and (p["ema9"] >= p["ema21"])
     sell_conditions["EMA9 Cross EMA21 Baru"] = "✅" if ema_cross_bear else "⚪"
     if ema_cross_bear: sell_score += 2
 
-    # [SELL 3] RSI di zona bearish (30-50)  → 2 poin
     rsi_bear = CONFIG["rsi_os"] <= c["rsi"] <= 50
     sell_conditions["RSI Zona Bearish (30-50)"] = "✅" if rsi_bear else "❌"
     if rsi_bear: sell_score += 2
 
-    # [SELL 4] MACD Histogram negatif & turun  → 2 poin
     macd_bear = c["macd_hist"] < 0 and c["macd_hist"] < p["macd_hist"]
     sell_conditions["MACD Histogram Bearish"] = "✅" if macd_bear else "❌"
     if macd_bear: sell_score += 2
 
-    # [SELL 5] Volume konfirmasi  → 1 poin
     sell_conditions["Volume Konfirmasi"] = "✅" if vol_ok else "⚪"
     if vol_ok: sell_score += 1
 
-    # ═══════════════════════════════════════════════════════════════
-    #  TENTUKAN SINYAL FINAL
-    # ═══════════════════════════════════════════════════════════════
+    # ── SINYAL FINAL ──────────────────────────────────────────────
     min_score = CONFIG["min_score"]
     atr = c["atr"]
     price = c["close"]
@@ -323,7 +448,6 @@ def is_market_active() -> tuple[bool, str]:
     hour = utc_now.hour
     weekday = utc_now.weekday()
     
-    # Sabtu (5) dan Minggu (6) = Tutup
     if weekday >= 5:
         return False, f"Weekend ({utc_now.strftime('%A')})"
     
@@ -347,7 +471,6 @@ def calculate_risk_metrics(signal: dict) -> dict:
     reward_pips = abs(entry - tp)
     rr_ratio = reward_pips / risk_pips if risk_pips > 0 else 0
     
-    # Estimasi durasi berdasarkan ATR (4 jam target)
     atr = signal["atr"]
     
     return {
@@ -360,8 +483,8 @@ def calculate_risk_metrics(signal: dict) -> dict:
 
 
 # ─── TELEGRAM ALERT ───────────────────────────────────────────────────────────
-def send_telegram_alert(signal: dict, risk: dict) -> bool:
-    """Kirim alert ke Telegram — BUY, SELL, dan WAIT"""
+def send_telegram_alert(signal: dict, risk: dict, change_reason: str = "") -> bool:
+    """Kirim alert ke Telegram — hanya saat sinyal berubah"""
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id   = os.environ.get("TELEGRAM_CHAT_ID")
     
@@ -373,17 +496,18 @@ def send_telegram_alert(signal: dict, risk: dict) -> bool:
     emoji_map = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⚪"}
     emoji = emoji_map.get(s, "⚪")
     
-    # Format kondisi
     conditions_text = ""
     for k, v in signal.get("conditions", {}).items():
         conditions_text += f"  {v} {k}\n"
     
-    # Format pesan
     now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%d/%m/%Y %H:%M WIB")
+    
+    # Tambahkan keterangan perubahan sinyal
+    change_note = f"\n🔔 *Update:* _{change_reason}_\n" if change_reason else ""
     
     msg = f"""
 {emoji} *XAUUSD SIGNAL ALERT* {emoji}
-
+{change_note}
 🕐 *Waktu:* {now_wib}
 📊 *Instrumen:* {CONFIG['symbol_display']} (H1)
 💡 *Sinyal:* `{s}`
@@ -434,11 +558,13 @@ def send_telegram_alert(signal: dict, risk: dict) -> bool:
 
 
 # ─── SAVE SIGNAL LOG ──────────────────────────────────────────────────────────
-def save_signal_log(signal: dict, risk: dict, market_status: str):
+def save_signal_log(signal: dict, risk: dict, market_status: str, alert_sent: bool = False, reason: str = ""):
     """Simpan log sinyal ke file JSON"""
     log_data = {
         "run_time"      : datetime.now(pytz.utc).isoformat(),
         "market_status" : market_status,
+        "alert_sent"    : alert_sent,
+        "skip_reason"   : reason if not alert_sent else "",
         "signal"        : signal,
         "risk_metrics"  : risk,
     }
@@ -453,7 +579,7 @@ def save_signal_log(signal: dict, risk: dict, market_status: str):
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info("  XAUUSD TRADING SIGNAL ENGINE - STARTED")
+    log.info("  XAUUSD TRADING SIGNAL ENGINE v2.0 - STARTED")
     log.info("=" * 60)
     
     # 1. Cek jam trading
@@ -465,14 +591,17 @@ def main():
         save_signal_log({"signal": "SKIP", "reason": market_status}, {}, market_status)
         return
     
-    # 2. Ambil data
+    # 2. Load state terakhir dari Gist
+    last_state = load_last_state()
+    
+    # 3. Ambil data
     df = fetch_ohlcv(CONFIG["symbol"], CONFIG["timeframe"], CONFIG["lookback_bars"])
     
-    # 3. Hitung indikator
+    # 4. Hitung indikator
     df = calculate_indicators(df)
     log.info(f"Indikator dihitung: {len(df)} candle valid")
     
-    # 4. Analisis sinyal
+    # 5. Analisis sinyal
     signal = analyze_signal(df)
     risk = calculate_risk_metrics(signal)
     
@@ -483,11 +612,19 @@ def main():
         log.info(f"Entry: ${signal['entry']:,.2f} | SL: ${signal['stop_loss']:,.2f} | TP: ${signal['take_profit']:,.2f}")
         log.info(f"R:R Ratio: 1:{risk.get('rr_ratio', 0):.1f}")
     
-    # 5. Kirim alert — selalu kirim apapun sinyalnya
-    send_telegram_alert(signal, risk)
+    # 6. Cek apakah perlu kirim alert
+    should_alert, reason = should_send_alert(signal, last_state)
     
-    # 6. Simpan log
-    save_signal_log(signal, risk, market_status)
+    log.info(f"Kirim alert: {'✅ YA' if should_alert else '⏭️ SKIP'} | Alasan: {reason}")
+    
+    alert_sent = False
+    if should_alert:
+        alert_sent = send_telegram_alert(signal, risk, change_reason=reason)
+        # 7. Simpan state baru ke Gist (hanya jika alert dikirim)
+        save_current_state(signal)
+    
+    # 8. Simpan log lokal
+    save_signal_log(signal, risk, market_status, alert_sent=alert_sent, reason=reason)
     
     log.info("=" * 60)
     log.info("  ANALISIS SELESAI")
