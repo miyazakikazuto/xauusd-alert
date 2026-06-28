@@ -1,5 +1,4 @@
 name: 🥇 XAUUSD Trading Alert - Auto Signal Check
-
 on:
   schedule:
     # ✅ Cron setiap 10 menit (GitHub minimum 5 menit)
@@ -14,22 +13,23 @@ on:
         default: 'false'
         type: boolean
 
+permissions:
+  contents: read
+  gists: write
+
 jobs:
   check-signal:
     name: 📊 Analyze XAUUSD Signal
     runs-on: ubuntu-latest
     timeout-minutes: 8  # Batas 8 menit agar tidak overlap
-
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
-
       - name: 🐍 Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-
       - name: 📦 Install Dependencies
         run: |
           pip install --upgrade pip
@@ -41,16 +41,16 @@ jobs:
             requests==2.31.0 \
             python-dotenv==1.0.0 \
             pytz==2024.1
-
       - name: 🔍 Run Signal Analysis
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          STATE_GIST_ID: ${{ secrets.STATE_GIST_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_CHECK: ${{ github.event.inputs.force_check || 'false' }}
         run: |
           python src/signal_engine.py
-
       - name: 📝 Upload Signal Log
         if: always()
         uses: actions/upload-artifact@v4
