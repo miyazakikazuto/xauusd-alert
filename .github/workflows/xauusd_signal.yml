@@ -13,10 +13,6 @@ on:
         default: 'false'
         type: boolean
 
-permissions:
-  contents: read
-  gists: write
-
 jobs:
   check-signal:
     name: 📊 Analyze XAUUSD Signal
@@ -47,7 +43,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           STATE_GIST_ID: ${{ secrets.STATE_GIST_ID }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT_GIST }}
           FORCE_CHECK: ${{ github.event.inputs.force_check || 'false' }}
         run: |
           python src/signal_engine.py
