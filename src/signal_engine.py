@@ -233,9 +233,7 @@ def compute_signal(candles: list[dict]) -> dict:
 
 # ─── ALERT SIGNAL (mode default) ──────────────────────────────────────────────
 def run_alert():
-    """Mode normal: cek sinyal dan kirim alert jika ada perubahan signifikan."""
     now_utc = datetime.now(timezone.utc)
-    # Market filter: Senin–Jumat, 07:00–21:00 UTC
     if now_utc.weekday() >= 5:
         print("Weekend — skip")
         return
@@ -272,34 +270,33 @@ def run_alert():
         )
         send_telegram(msg)
         print(f"Alert sent: {sig['direction']} @ {sig['price']}")
-
-        # Update state
-        new_state = {
-            "direction": sig["direction"],
-            "entry_price": sig["price"],
-            "score": sig["score"],
-            "timestamp": sig["timestamp"],
-        }
-        gist_write(GIST_FILENAME_STATE, new_state)
-
-        # Catat ke history harian
         _append_daily_history(sig, alerted=True)
     else:
         print(f"No alert: {sig['direction']} score={sig['score']} price={sig['price']}")
-        # Tetap catat ke history meski tidak alert (untuk summary)
-        _append_daily_history(sig, alerted=False)
+        _append_daily_history(sig, alerted=False)  # tetap catat untuk summary
+
+    # ✅ FIX 1: Selalu update state — bukan hanya saat alert
+    new_state = {
+        "direction": sig["direction"],
+        "entry_price": sig["price"] if should_alert else prev_entry,
+        "score": sig["score"],
+        "last_checked": sig["timestamp"],
+        "alerted": should_alert,
+    }
+    gist_write(GIST_FILENAME_STATE, new_state)
 
 
 # ─── HISTORY HELPER ───────────────────────────────────────────────────────────
 def _append_daily_history(sig: dict, alerted: bool):
-    """
-    Simpan sinyal ke history harian di Gist.
-    Format: { "YYYY-MM-DD": [ {...signal, alerted: bool}, ... ] }
-    Hanya simpan entry yang alerted=True dan entry terakhir setiap 30 menit
-    untuk hemat storage — bisa disesuaikan.
-    """
+    # ✅ FIX 2: Hapus early return — simpan semua entry
+    # Tapi filter: hanya simpan tiap 30 menit jika tidak alert (hemat storage)
+    now_utc = datetime.now(timezone.utc)
+    
     if not alerted:
-        return  # Hanya simpan yang benar-benar di-alert
+        # Throttle: simpan hanya di menit 0 atau 30 (setiap 30 menit)
+        if now_utc.minute not in range(0, 5) and now_utc.minute not in range(30, 35):
+            print(f"History throttled (non-alert) — skip write")
+            return
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     history = gist_read(GIST_FILENAME_HISTORY)
@@ -308,19 +305,17 @@ def _append_daily_history(sig: dict, alerted: bool):
         history[today] = []
 
     history[today].append({
-        "time": datetime.now(timezone.utc).strftime("%H:%M"),
+        "time": now_utc.strftime("%H:%M"),
         "direction": sig["direction"],
         "price": sig["price"],
         "score": sig["score"],
         "rsi": sig["rsi"],
         "sl": sig["sl"],
         "tp": sig["tp"],
+        "alerted": alerted,  # ← tambah flag ini untuk daily summary
     })
 
-    # Batasi max 50 entri per hari (anti bloat)
     history[today] = history[today][-50:]
-
-    # Hapus history lebih dari 7 hari
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     history = {k: v for k, v in history.items() if k >= cutoff}
 
