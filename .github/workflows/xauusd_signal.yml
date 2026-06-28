@@ -1,10 +1,6 @@
 name: 🥇 XAUUSD Trading Alert - Auto Signal Check
 on:
-  schedule:
-    # ✅ Cron setiap 10 menit (GitHub minimum 5 menit)
-    - cron: '*/10 * * * *'
-  
-  # Manual trigger untuk testing
+  # Trigger hanya via cron-job.org (POST workflow_dispatch setiap 10 menit)
   workflow_dispatch:
     inputs:
       force_check:
