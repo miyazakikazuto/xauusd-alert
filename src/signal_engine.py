@@ -12,6 +12,18 @@ import argparse
 import requests
 from datetime import datetime, timezone, timedelta
 
+# ─── TIMEZONE ─────────────────────────────────────────────────────────────────
+WIB = timezone(timedelta(hours=7))
+
+def now_wib() -> datetime:
+    return datetime.now(WIB)
+
+def to_wib_str(dt_utc: datetime, fmt: str = "%H:%M") -> str:
+    """Konversi naive UTC datetime ke string WIB."""
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    return dt_utc.astimezone(WIB).strftime(fmt)
+
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -59,11 +71,38 @@ def gist_read(filename: str) -> dict:
 
 
 def gist_write(filename: str, data: dict):
-    """Tulis / update satu file di Gist."""
+    """Tulis / update satu file di Gist. Retry sekali jika 409 Conflict."""
     url = f"https://api.github.com/gists/{STATE_GIST_ID}"
     payload = {"files": {filename: {"content": json.dumps(data, indent=2)}}}
-    r = requests.patch(url, headers=_gist_headers(), json=payload, timeout=10)
-    r.raise_for_status()
+    for attempt in range(2):
+        r = requests.patch(url, headers=_gist_headers(), json=payload, timeout=10)
+        if r.status_code == 409 and attempt == 0:
+            print(f"Gist 409 conflict — retry setelah 2 detik...")
+            time.sleep(2)
+            continue
+        r.raise_for_status()
+        break
+
+
+def gist_write_multi(files: dict):
+    """Tulis beberapa file ke Gist dalam SATU request (hindari 409 race condition).
+    files = {filename: data_dict, ...}
+    """
+    url = f"https://api.github.com/gists/{STATE_GIST_ID}"
+    payload = {
+        "files": {
+            fname: {"content": json.dumps(fdata, indent=2)}
+            for fname, fdata in files.items()
+        }
+    }
+    for attempt in range(2):
+        r = requests.patch(url, headers=_gist_headers(), json=payload, timeout=10)
+        if r.status_code == 409 and attempt == 0:
+            print(f"Gist 409 conflict — retry setelah 2 detik...")
+            time.sleep(2)
+            continue
+        r.raise_for_status()
+        break
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -254,6 +293,10 @@ def run_alert():
 
     should_alert = has_signal and (direction_changed or price_moved)
 
+    # Timestamp WIB untuk display
+    wib_now = now_wib()
+    wib_time_str = wib_now.strftime("%H:%M")
+
     if should_alert:
         emoji = "🟢" if sig["direction"] == "BUY" else "🔴"
         msg = (
@@ -266,16 +309,15 @@ def run_alert():
             f"━━━━━━━━━━━━━━\n"
             f"🛡️ SL    : ${round(sig['price'] - sig['sl'], 2) if sig['direction']=='BUY' else round(sig['price'] + sig['sl'], 2)}\n"
             f"🎯 TP    : ${round(sig['price'] + sig['tp'], 2) if sig['direction']=='BUY' else round(sig['price'] - sig['tp'], 2)}\n"
-            f"⏰ {now_utc.strftime('%H:%M')} UTC"
+            f"⏰ {wib_time_str} WIB"
         )
         send_telegram(msg)
         print(f"Alert sent: {sig['direction']} @ {sig['price']}")
-        _append_daily_history(sig, alerted=True)
+
     else:
         print(f"No alert: {sig['direction']} score={sig['score']} price={sig['price']}")
-        _append_daily_history(sig, alerted=False)  # tetap catat untuk summary
 
-    # ✅ FIX 1: Selalu update state — bukan hanya saat alert
+    # ✅ FIX 409: Gabung state + history dalam SATU gist_write_multi call
     new_state = {
         "direction": sig["direction"],
         "entry_price": sig["price"] if should_alert else prev_entry,
@@ -283,51 +325,69 @@ def run_alert():
         "last_checked": sig["timestamp"],
         "alerted": should_alert,
     }
-    gist_write(GIST_FILENAME_STATE, new_state)
+    updated_history = _build_history_update(sig, alerted=should_alert)
+
+    if updated_history is not None:
+        # Tulis state + history sekaligus → satu PATCH request
+        gist_write_multi({
+            GIST_FILENAME_STATE: new_state,
+            GIST_FILENAME_HISTORY: updated_history,
+        })
+    else:
+        # History di-throttle, tulis state saja
+        gist_write(GIST_FILENAME_STATE, new_state)
 
 
 # ─── HISTORY HELPER ───────────────────────────────────────────────────────────
-def _append_daily_history(sig: dict, alerted: bool):
+def _build_history_update(sig: dict, alerted: bool) -> dict | None:
+    """
+    Bangun dict history yang sudah diupdate.
+    Return None jika throttled (tidak perlu write).
+    Timestamp disimpan dalam WIB.
+    """
     now_utc = datetime.now(timezone.utc)
-    
+
     if not alerted:
         # Throttle: simpan tiap 10 menit (menit 0,10,20,30,40,50)
         if now_utc.minute % 10 not in range(0, 3):
             print(f"History throttled (non-alert) — skip write")
-            return
-    # ... sisa kode sama
+            return None
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    wib_now    = now_utc.astimezone(WIB)
+    today      = wib_now.strftime("%Y-%m-%d")   # tanggal WIB
+    time_str   = wib_now.strftime("%H:%M")       # jam WIB
+
     history = gist_read(GIST_FILENAME_HISTORY)
 
     if today not in history:
         history[today] = []
 
     history[today].append({
-        "time": now_utc.strftime("%H:%M"),
+        "time": time_str,
         "direction": sig["direction"],
         "price": sig["price"],
         "score": sig["score"],
         "rsi": sig["rsi"],
         "sl": sig["sl"],
         "tp": sig["tp"],
-        "alerted": alerted,  # ← tambah flag ini untuk daily summary
+        "alerted": alerted,
     })
 
     history[today] = history[today][-50:]
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    cutoff = (wib_now - timedelta(days=7)).strftime("%Y-%m-%d")
     history = {k: v for k, v in history.items() if k >= cutoff}
 
-    gist_write(GIST_FILENAME_HISTORY, history)
+    return history
 
 
 # ─── DAILY SUMMARY (mode baru) ────────────────────────────────────────────────
 def run_daily_summary():
     """
     Mode daily summary: baca history hari ini dari Gist, hitung stats,
-    kirim rekap ke Telegram. Dipanggil jam 21:00 UTC.
+    kirim rekap ke Telegram. Dipanggil jam 21:00 UTC (= 04:00 WIB besok).
+    History key sudah dalam WIB, jadi pakai today WIB.
     """
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_wib().strftime("%Y-%m-%d")   # ← WIB date
     history = gist_read(GIST_FILENAME_HISTORY)
     entries = history.get(today, [])
 
@@ -399,7 +459,7 @@ def run_daily_summary():
 
     msg = (
         f"📊 <b>XAU/USD Daily Summary</b>\n"
-        f"📅 {today} | London Close 21:00 UTC\n"
+        f"📅 {today} | London Close 04:00 WIB\n"
         f"━━━━━━━━━━━━━━\n"
         f"{bias_emoji} <b>Bias Hari Ini: {dominant}</b> ({dominant_pct}%)\n"
         f"\n"
@@ -420,7 +480,7 @@ def run_daily_summary():
         f"⏱️ <b>5 Data Terakhir:</b>\n"
         f"{timeline_str}\n"
         f"━━━━━━━━━━━━━━\n"
-        f"🕘 First: {first['time']} UTC | Last: {last['time']} UTC"
+        f"🕘 First: {first['time']} WIB | Last: {last['time']} WIB"
     )
 
     send_telegram(msg)
