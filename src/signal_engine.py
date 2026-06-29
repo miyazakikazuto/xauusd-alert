@@ -288,15 +288,14 @@ def run_alert():
 
 # ─── HISTORY HELPER ───────────────────────────────────────────────────────────
 def _append_daily_history(sig: dict, alerted: bool):
-    # ✅ FIX 2: Hapus early return — simpan semua entry
-    # Tapi filter: hanya simpan tiap 30 menit jika tidak alert (hemat storage)
     now_utc = datetime.now(timezone.utc)
     
     if not alerted:
-        # Throttle: simpan hanya di menit 0 atau 30 (setiap 30 menit)
-        if now_utc.minute not in range(0, 5) and now_utc.minute not in range(30, 35):
+        # Throttle: simpan tiap 10 menit (menit 0,10,20,30,40,50)
+        if now_utc.minute % 10 not in range(0, 3):
             print(f"History throttled (non-alert) — skip write")
             return
+    # ... sisa kode sama
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     history = gist_read(GIST_FILENAME_HISTORY)
@@ -355,16 +354,25 @@ def run_daily_summary():
     # Hitung statistik
     buy_signals  = [e for e in entries if e["direction"] == "BUY"]
     sell_signals = [e for e in entries if e["direction"] == "SELL"]
+    wait_signals = [e for e in entries if e["direction"] == "WAIT"]
     total        = len(entries)
 
-    # Dominant direction
-    dominant = "BUY" if len(buy_signals) >= len(sell_signals) else "SELL"
-    dominant_pct = round(
-        (len(buy_signals) / total * 100) if dominant == "BUY"
-        else (len(sell_signals) / total * 100)
-    )
+    # ✅ FIX: Handle kasus semua WAIT
+    alerted_entries = [e for e in entries if e["direction"] in ("BUY", "SELL")]
 
-    # First dan last signal
+    if not alerted_entries:
+        dominant = "WAIT"
+        dominant_pct = 100
+        bias_emoji = "⚪"
+    else:
+        dominant = "BUY" if len(buy_signals) >= len(sell_signals) else "SELL"
+        dominant_pct = round(
+            (len(buy_signals) / len(alerted_entries) * 100) if dominant == "BUY"
+            else (len(sell_signals) / len(alerted_entries) * 100)
+        )
+        bias_emoji = "🟢" if dominant == "BUY" else "🔴"
+
+    # First dan last entry
     first = entries[0]
     last  = entries[-1]
 
@@ -376,15 +384,17 @@ def run_daily_summary():
     high_price = max(prices)
     low_price  = min(prices)
 
-    # Bias emoji
-    bias_emoji = "🟢" if dominant == "BUY" else "🔴"
+    # ✅ FIX: Emoji WAIT di timeline
+    def dir_emoji(d):
+        return "🟢" if d == "BUY" else ("🔴" if d == "SELL" else "⚪")
 
     # Format signal timeline (max 5 terakhir)
     timeline_entries = entries[-5:] if len(entries) > 5 else entries
     timeline_lines = []
     for e in timeline_entries:
-        e_emoji = "🟢" if e["direction"] == "BUY" else "🔴"
-        timeline_lines.append(f"  {e['time']} {e_emoji} {e['direction']} @ ${e['price']}")
+        timeline_lines.append(
+            f"  {e['time']} {dir_emoji(e['direction'])} {e['direction']} @ ${e['price']}"
+        )
     timeline_str = "\n".join(timeline_lines)
 
     msg = (
@@ -393,27 +403,28 @@ def run_daily_summary():
         f"━━━━━━━━━━━━━━\n"
         f"{bias_emoji} <b>Bias Hari Ini: {dominant}</b> ({dominant_pct}%)\n"
         f"\n"
-        f"📈 Total Signal  : {total} alert\n"
-        f"🟢 BUY Signal    : {len(buy_signals)}x\n"
-        f"🔴 SELL Signal   : {len(sell_signals)}x\n"
-        f"⭐ Avg Score     : {avg_score}/10\n"
+        f"📈 Total Tercatat : {total} data\n"
+        f"🟢 BUY Signal     : {len(buy_signals)}x\n"
+        f"🔴 SELL Signal    : {len(sell_signals)}x\n"
+        f"⚪ WAIT           : {len(wait_signals)}x\n"
+        f"⭐ Avg Score      : {avg_score}/10\n"
         f"\n"
-        f"💰 Range Harga   : ${low_price:,.2f} – ${high_price:,.2f}\n"
+        f"💰 Range Harga    : ${low_price:,.2f} – ${high_price:,.2f}\n"
     )
 
     if current_price:
-        msg += f"📍 Harga Sekarang: <b>${current_price:,.2f}</b>\n"
+        msg += f"📍 Harga Sekarang : <b>${current_price:,.2f}</b>\n"
 
     msg += (
         f"\n"
-        f"⏱️ <b>5 Signal Terakhir:</b>\n"
+        f"⏱️ <b>5 Data Terakhir:</b>\n"
         f"{timeline_str}\n"
         f"━━━━━━━━━━━━━━\n"
         f"🕘 First: {first['time']} UTC | Last: {last['time']} UTC"
     )
 
     send_telegram(msg)
-    print(f"Daily summary sent: {total} signals, dominant={dominant}")
+    print(f"Daily summary sent: {total} entries, dominant={dominant}")
 
     # Reset history hari ini setelah summary dikirim (opsional)
     # Hapus hari ini dari history supaya besok fresh
