@@ -1,4 +1,4 @@
-name: XAU/USD Alert System v3.0
+name: Multi-Asset Alert System v3.1
 
 on:
   workflow_dispatch:
@@ -7,6 +7,14 @@ on:
         description: 'Mode: alert atau daily-summary'
         required: false
         default: 'alert'
+      symbol:
+        description: 'Symbol: xau atau btc'
+        required: false
+        default: 'xau'
+        type: choice
+        options:
+          - xau
+          - btc
 
 jobs:
   # ─── JOB 1: Signal Alert (dipicu oleh cron-job.org setiap 10 menit) ────────
@@ -34,7 +42,7 @@ jobs:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           STATE_GIST_ID:      ${{ secrets.STATE_GIST_ID }}
           GH_PAT_GIST:        ${{ secrets.GH_PAT_GIST }}
-        run: python src/signal_engine.py --mode alert
+        run: python src/signal_engine.py --mode alert --symbol "${{ github.event.inputs.symbol || 'xau' }}"
 
   # ─── JOB 2: Daily Summary (dipicu oleh cron-job.org jam 21:00 UTC) ─────────
   daily-summary:
@@ -61,4 +69,4 @@ jobs:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           STATE_GIST_ID:      ${{ secrets.STATE_GIST_ID }}
           GH_PAT_GIST:        ${{ secrets.GH_PAT_GIST }}
-        run: python src/signal_engine.py --mode daily-summary
+        run: python src/signal_engine.py --mode daily-summary --symbol "${{ github.event.inputs.symbol || 'xau' }}"
