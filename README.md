@@ -18,45 +18,65 @@ Kenapa BTC dapat multiplier lebih besar: volatilitas BTC jauh lebih tinggi dari 
 ## 📋 STRATEGI TRADING
 
 ### Konsep Dasar
-Sistem ini dirancang untuk **hold posisi ±4 jam** menggunakan **timeframe H1** sebagai trigger sinyal.
+
+Sistem ini memakai **timeframe M15 (15 menit)** sebagai basis sinyal, dengan target hold **beberapa puluh menit hingga 1-2 jam per posisi** — lebih cepat dari swing H1, tapi tidak secepat scalping M1/M5 murni. M15 dipilih secara sadar (bukan default lama) karena tiga alasan:
+
+1. **Selaras dengan latensi infrastruktur** — sistem dipicu cron eksternal tiap ±10 menit lewat GitHub Actions, bukan eksekusi real-time. Di M15, jendela 10 menit itu masih berada di dalam satu candle yang sama, jadi sinyal tidak pernah "basi" sebelum sempat dibaca. Di M5, window trigger 10 menit bisa melompati satu candle penuh.
+2. **Rasio spread terhadap SL lebih sehat** — ATR di M15 jauh lebih besar dari M5, sehingga spread broker riil menghabiskan porsi lebih kecil dari jarak Stop Loss. Di M5, spread bisa memakan 30-40%+ dari SL sebelum harga sempat bergerak.
+3. **Sinyal lebih tersaring dari noise jangka sangat pendek**, tanpa kehilangan kecepatan reaksi yang berarti untuk trader yang mengeksekusi manual dari notifikasi Telegram.
+
+> Catatan: TwelveData tidak menyediakan interval `10min` — pilihan interval intraday yang tersedia adalah `1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 8h`. M15 adalah titik temu terbaik antara kecepatan dan keandalan sinyal untuk arsitektur cron-based sistem ini.
 
 ### Indikator yang Digunakan
 
-| Indikator | Parameter | Fungsi |
+| Indikator | Parameter | Peran |
 |-----------|-----------|--------|
-| EMA 9 | Fast | Trend jangka pendek |
-| EMA 21 | Mid | Trend konfirmasi |
-| EMA 50 | Slow | Filter trend utama |
-| RSI | 14 | Momentum & OS/OB |
-| MACD | 12, 26, 9 | Konfirmasi momentum |
-| Bollinger Bands | 20, 2 | Volatility gauge |
+| EMA 9 / 21 / 50 | Fast / Mid / Slow | **Penentu arah (gerbang trend)** — menentukan `trend_bias`: up, down, atau neutral |
+| RSI | 14 | **Timing entry**, bukan sinyal kontrarian independen (lihat di bawah) |
+| MACD | 12, 26, 9 | Konfirmasi momentum searah trend |
+| Bollinger Bands | 20, 2 | **Timing entry** tambahan, sama seperti RSI — hanya valid searah trend |
 | ATR | 14 | Kalkulasi SL & TP |
-| Volume | MA-20 | Konfirmasi sinyal |
+
+> **Volume MA-20 belum diimplementasikan** di v3.2 — dihapus dari daftar aktif sampai benar-benar dibangun, supaya dokumentasi ini tidak menjanjikan indikator yang belum ada di kode.
+
+### Filosofi: Trend-Following sebagai Arah, RSI/BB sebagai Timing (bukan Mean-Reversion Murni)
+
+Versi sebelum v3.2 memakai RSI dan Bollinger Bands sebagai **sinyal kontrarian independen** (RSI oversold = BUY, tanpa peduli arah trend besar). Ini bisa membuat sistem "menangkap pisau jatuh" — misalnya tetap kasih sinyal BUY saat RSI oversold, padahal EMA-stack sedang menunjukkan downtrend kuat.
+
+**v3.2 mengubah RSI & Bollinger jadi bergerbang oleh trend (`trend_bias`) dari EMA9/21/50:**
+
+- RSI dip (< 40) atau sentuhan Bollinger band bawah **hanya dihitung sebagai skor BUY** kalau `trend_bias` bukan "down" — konsepnya "beli saat harga dip sesaat di dalam uptrend/kondisi netral", bukan "beli karena RSI rendah, titik."
+- RSI rally (> 60) atau sentuhan band atas **hanya dihitung sebagai skor SELL** kalau `trend_bias` bukan "up" — konsepnya "jual saat harga rally sesaat di dalam downtrend/kondisi netral."
+- Kalau trend_bias berlawanan arah dengan sinyal RSI/BB (misal RSI oversold di tengah downtrend kuat), sinyal itu **diabaikan sepenuhnya** — tidak menyumbang skor ke arah mana pun.
 
 ### Aturan Entry
 
-**✅ BUY Signal (Semua harus terpenuhi):**
+**✅ BUY — kontribusi skor (maksimum 10):**
 ```
-EMA9 > EMA21 > EMA50   (Stack bullish)
-RSI antara 50 - 70     (Momentum bullish, belum OB)
-MACD Histogram > 0     (Momentum positif)
-Score minimal 6/10     (Minimum 3 kondisi valid)
++3   EMA9 > EMA21 > EMA50 dan price di atas ketiganya   (trend bullish penuh)
++1   EMA9 > EMA21 saja                                   (trend bullish parsial)
++2   RSI < 40   — HANYA jika trend_bias ≠ "down"          (dip di dalam uptrend/netral)
++2   MACD histogram > 0 dan MACD line > signal line
++2   Price ≤ Bollinger band bawah — HANYA jika trend_bias ≠ "down"
+Sinyal BUY terpicu jika skor ≥ 6/10
 ```
 
-**🔴 SELL Signal (Semua harus terpenuhi):**
+**🔴 SELL — kontribusi skor (maksimum 10):**
 ```
-EMA9 < EMA21 < EMA50   (Stack bearish)
-RSI antara 30 - 50     (Momentum bearish, belum OS)
-MACD Histogram < 0     (Momentum negatif)
-Score minimal 6/10     (Minimum 3 kondisi valid)
++3   EMA9 < EMA21 < EMA50 dan price di bawah ketiganya   (trend bearish penuh)
++1   EMA9 < EMA21 saja                                   (trend bearish parsial)
++2   RSI > 60   — HANYA jika trend_bias ≠ "up"            (rally di dalam downtrend/netral)
++2   MACD histogram < 0 dan MACD line < signal line
++2   Price ≥ Bollinger band atas — HANYA jika trend_bias ≠ "up"
+Sinyal SELL terpicu jika skor ≥ 6/10
 ```
 
 ### Risk Management
 
 ```
-Stop Loss  = 1.5x ATR14  (Risk dinamis sesuai volatility)
-Take Profit = 3.0x ATR14  (Risk:Reward = 1:2)
-Target Hold = ±4 Jam (2-4 candle H1)
+Stop Loss   = ATR(14) di M15 × atr_sl_mult per-symbol   (1.5x untuk XAU, 2.5x untuk BTC)
+Take Profit = ATR(14) di M15 × atr_tp_mult per-symbol   (3.0x untuk keduanya, Risk:Reward = 1:2)
+Target Hold = beberapa puluh menit – 1-2 jam per posisi (bukan lagi ±4 jam basis H1)
 ```
 
 ---
@@ -115,38 +135,22 @@ Karena BTC trading 24/7, jadwal cron-nya bisa `* * * * *` tiap 10 menit **tanpa 
 
 ## 📱 FORMAT ALERT TELEGRAM
 
+Ini adalah format yang **benar-benar dikirim** oleh `run_alert()` di v3.2 (bukan mockup) — apa yang kamu lihat di Telegram akan persis seperti ini:
+
 ```
-🟢 XAUUSD SIGNAL ALERT 🟢
-
-🕐 Waktu: 25/06/2026 15:30 WIB
-📊 Instrumen: XAU/USD (H1)
-💡 Sinyal: BUY
-🎯 Kekuatan: 8/10 poin
-
-💰 HARGA SEKARANG: $2,345.50
-
-⬆️ ENTRY:       $2,345.50
-🛑 Stop Loss:   $2,330.20  (15.3 pips)
-🎯 Take Profit: $2,376.00  (30.5 pips)
-⚖️ Risk:Reward: 1 : 2.0
-⏰ Target Hold: ±4 Jam (2-4 Candle H1)
-
-📈 KONDISI SINYAL:
-  ✅ EMA Stack Bullish
-  ✅ EMA9 Cross EMA21 Baru
-  ✅ RSI Zona Bullish (50-70)
-  ✅ MACD Histogram Bullish
-  ✅ Volume Konfirmasi
-
-📉 INDIKATOR UTAMA:
-  • EMA 9 : 2,342.30
-  • EMA 21: 2,338.90
-  • EMA 50: 2,328.50
-  • RSI   : 58.4
-  • MACD  : +0.823 (histogram)
-  • Volume: 1.45x rata-rata
-  • ATR   : 10.20
+🟢 🥇 XAU/USD Signal: BUY
+━━━━━━━━━━━━━━
+💰 Price : $2,345.50
+📊 Score : 8/10
+📈 RSI   : 38.4
+📉 MACD  : +0.0823
+━━━━━━━━━━━━━━
+🛡️ SL    : $2,330.20
+🎯 TP    : $2,376.00
+⏰ 15:30 WIB
 ```
+
+Kalau kamu ingin format yang lebih kaya seperti breakdown kondisi sinyal per-indikator (EMA stack, konfirmasi MACD, dll.) atau info pips, itu **belum diimplementasikan** — perlu ditambahkan secara eksplisit di fungsi `run_alert()`, bukan cuma diasumsikan ada.
 
 ---
 
