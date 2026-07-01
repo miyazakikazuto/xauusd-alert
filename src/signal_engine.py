@@ -357,12 +357,26 @@ def run_alert(cfg: dict):
     else:
         print(f"[{cfg['display']}] No alert: {sig['direction']} score={sig['score']} price={sig['price']}")
 
+    # SL/TP dalam bentuk price level aktual (bukan jarak ATR mentah), sama
+    # seperti yang ditampilkan di pesan Telegram — biar konsisten untuk audit.
+    if sig["direction"] == "BUY":
+        sl_price = round(sig["price"] - sig["sl"], 2)
+        tp_price = round(sig["price"] + sig["tp"], 2)
+    elif sig["direction"] == "SELL":
+        sl_price = round(sig["price"] + sig["sl"], 2)
+        tp_price = round(sig["price"] - sig["tp"], 2)
+    else:
+        sl_price = None
+        tp_price = None
+
     # ✅ FIX 409: Gabung state + history dalam SATU gist_write_multi call
     new_state = {
         "direction": sig["direction"],
         "entry_price": sig["price"] if should_alert else prev_entry,
         "score": sig["score"],
-        "last_checked": sig["timestamp"],
+        "sl": sl_price,
+        "tp": tp_price,
+        "time": wib_now.strftime("%Y-%m-%d %H:%M") + " WIB",
         "alerted": should_alert,
     }
     updated_history = _build_history_update(cfg, sig, alerted=should_alert)
