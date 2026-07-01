@@ -1,6 +1,17 @@
-# 🥇 XAUUSD Trading Alert System
+# 🥇₿ Multi-Asset Trading Alert System
 
-> Sistem alert trading otomatis untuk XAU/USD menggunakan GitHub Actions + Multi-Indikator Strategy
+> Sistem alert trading otomatis untuk **XAU/USD** dan **BTC/USD (Binance)** menggunakan GitHub Actions + Multi-Indikator Strategy + TwelveData
+
+---
+
+## 🪙 SYMBOL YANG DIDUKUNG
+
+| Key | TwelveData Symbol | Exchange | Trading Hours | ATR SL Mult | ATR TP Mult | Price Move Threshold |
+|-----|--------------------|----------|----------------|-------------|-------------|------------------------|
+| `xau` | `XAU/USD` | — (spot aggregated) | Weekday, 07:00–21:00 UTC | 1.5x | 3.0x | $5 |
+| `btc` | `BTC/USD` | Binance | 24/7 | 2.5x | 3.0x | $50 |
+
+Kenapa BTC dapat multiplier lebih besar: volatilitas BTC jauh lebih tinggi dari XAU, jadi SL 1.5x ATR terlalu ketat dan gampang kena stop-out premature. State dan history disimpan di file Gist terpisah per symbol (`xauusd_state.json` vs `btcusd_state.json`) supaya tidak saling timpa dalam satu Gist ID.
 
 ---
 
@@ -85,10 +96,20 @@ Pergi ke `Settings → Secrets → Actions → New repository secret`:
 
 ### Step 5 — Test Manual
 
-1. Pergi ke **Actions → XAUUSD Trading Alert**
+1. Pergi ke **Actions → Multi-Asset Alert System v3.1**
 2. Klik **"Run workflow"**
-3. Centang **"Force check"** untuk bypass cek jam trading
+3. Pilih **mode** (`alert` atau `daily-summary`) dan **symbol** (`xau` atau `btc`)
 4. Klik **"Run workflow"**
+
+### Step 6 — Setup cron-job.org untuk BTC (opsional, kalau mau alert otomatis)
+
+Symbol `xau` sudah jalan otomatis lewat cron job yang existing. Untuk `btc`, tambahkan **job cron-job.org baru** yang trigger `workflow_dispatch` dengan body berbeda:
+
+```json
+{"ref":"main","inputs":{"mode":"alert","symbol":"btc"}}
+```
+
+Karena BTC trading 24/7, jadwal cron-nya bisa `* * * * *` tiap 10 menit **tanpa batas jam** (beda dari job XAU yang dibatasi weekday 07:00–21:00 UTC). Header dan endpoint sama seperti job XAU (`POST /repos/{owner}/{repo}/actions/workflows/xauusd_signal.yml/dispatches`).
 
 ---
 
@@ -131,15 +152,32 @@ Pergi ke `Settings → Secrets → Actions → New repository secret`:
 
 ## ⚙️ KONFIGURASI LANJUTAN
 
-Edit file `src/signal_engine.py` bagian `CONFIG`:
+Edit file `src/signal_engine.py` bagian `SYMBOLS`. Tambah key baru untuk menambah symbol lain (misal ETH/USD):
 
 ```python
-CONFIG = {
-    "min_score"      : 6,    # Naikkan ke 7-8 untuk sinyal lebih selektif
-    "sl_multiplier"  : 1.5,  # Ubah SL lebih ketat/longgar
-    "tp_multiplier"  : 3.0,  # Ubah TP target
-    "active_hours_utc": list(range(7, 21)),  # Jam aktif UTC
+SYMBOLS = {
+    "xau": {
+        "td_symbol": "XAU/USD", "td_exchange": None,
+        "gist_state": "xauusd_state.json", "gist_history": "xauusd_daily_history.json",
+        "atr_sl_mult": 1.5, "atr_tp_mult": 3.0,
+        "price_move_threshold": 5.0, "trades_24_7": False,
+    },
+    "btc": {
+        "td_symbol": "BTC/USD", "td_exchange": "Binance",
+        "gist_state": "btcusd_state.json", "gist_history": "btcusd_daily_history.json",
+        "atr_sl_mult": 2.5, "atr_tp_mult": 3.0,
+        "price_move_threshold": 50.0, "trades_24_7": True,
+    },
+    # "eth": { ... }  ← tinggal tambah di sini + registrasi di --symbol choices
 }
+```
+
+`SCORE_THRESHOLD` (default 6/10) masih global untuk semua symbol — belum per-symbol, karena scoring logic-nya sama.
+
+Jalankan manual dari CLI:
+```bash
+python src/signal_engine.py --mode alert --symbol btc
+python src/signal_engine.py --mode daily-summary --symbol xau
 ```
 
 ---
