@@ -200,10 +200,11 @@ python src/signal_engine.py --mode daily-summary --symbol xau
 xauusd-alert/
 ├── .github/
 │   └── workflows/
-│       └── xauusd_signal.yml    # Cron trigger setiap 10 menit
+│       └── xauusd_signal.yml    # Trigger via workflow_dispatch (dipicu cron-job.org)
 ├── src/
 │   └── signal_engine.py         # Engine analisis utama
-├── logs/                        # Log sinyal (auto-generated)
 ├── requirements.txt             # Python dependencies
 └── README.md                    # Dokumentasi ini
 ```
+
+> **Soal log:** sistem ini tidak menulis file log fisik ke repo (tidak ada folder `logs/`). Semua output `print()` dari tiap run — termasuk alasan skip ("Weekend — skip", "Outside market hours — skip"), hasil skor, dan status alert — bisa dilihat langsung di **tab Actions → pilih run → buka step "Run Signal Engine"**. Itulah log kamu yang sebenarnya.
