@@ -1,7 +1,10 @@
 """
-XAU/USD Signal Engine v3.0
+Multi-Asset Signal Engine v3.1
 - v2.0: state persistence via Gist, anti-spam logic
-- v3.0: tambah --daily-summary mode untuk rekap harian jam 21:00 UTC
+- v3.0: tambah --mode daily-summary untuk rekap harian jam 21:00 UTC
+- v3.1: config-driven multi-symbol (XAU/USD + BTC/USD via Binance),
+        per-symbol ATR multiplier, per-symbol Gist state key,
+        24/7 market hours untuk crypto
 """
 
 import os
@@ -25,24 +28,57 @@ def to_wib_str(dt_utc: datetime, fmt: str = "%H:%M") -> str:
     return dt_utc.astimezone(WIB).strftime(fmt)
 
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
+# ─── CONFIG (SECRETS) ──────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 TWELVEDATA_API_KEY = os.environ["TWELVEDATA_API_KEY"]
 STATE_GIST_ID      = os.environ["STATE_GIST_ID"]
 GH_PAT_GIST        = os.environ["GH_PAT_GIST"]
 
-GIST_FILENAME_STATE   = "xauusd_state.json"
-GIST_FILENAME_HISTORY = "xauusd_daily_history.json"
-
-SYMBOL    = "XAU/USD"
-INTERVAL  = "5min"
-EMA_FAST  = 9
-EMA_MID   = 21
-EMA_SLOW  = 50
+INTERVAL   = "5min"
+EMA_FAST   = 9
+EMA_MID    = 21
+EMA_SLOW   = 50
 RSI_PERIOD = 14
 SCORE_THRESHOLD = 6
-PRICE_MOVE_THRESHOLD = 5.0   # $5 minimum move untuk re-alert
+
+# ─── CONFIG (PER-SYMBOL) ────────────────────────────────────────────────────────
+# Setiap symbol punya: parameter TwelveData, nama file Gist sendiri (state +
+# history terpisah supaya tidak saling timpa di Gist yang sama), ATR multiplier
+# sendiri (BTC lebih volatile → SL lebih lebar), threshold anti-spam sendiri,
+# dan flag trades_24_7 (BTC tidak libur weekend/jam market seperti forex/gold).
+SYMBOLS = {
+    "xau": {
+        "td_symbol":            "XAU/USD",
+        "td_exchange":          None,
+        "display":              "XAU/USD",
+        "asset_emoji":          "🥇",
+        "gist_state":           "xauusd_state.json",
+        "gist_history":         "xauusd_daily_history.json",
+        "atr_sl_mult":          1.5,
+        "atr_tp_mult":          3.0,
+        "price_move_threshold": 5.0,
+        "trades_24_7":          False,
+    },
+    "btc": {
+        "td_symbol":            "BTC/USD",
+        "td_exchange":          "Binance",
+        "display":              "BTC/USD",
+        "asset_emoji":          "₿",
+        "gist_state":           "btcusd_state.json",
+        "gist_history":         "btcusd_daily_history.json",
+        "atr_sl_mult":          2.5,
+        "atr_tp_mult":          3.0,
+        "price_move_threshold": 50.0,
+        "trades_24_7":          True,
+    },
+}
+
+
+def get_symbol_config(symbol_key: str) -> dict:
+    if symbol_key not in SYMBOLS:
+        raise ValueError(f"Unknown symbol '{symbol_key}'. Pilihan: {list(SYMBOLS.keys())}")
+    return SYMBOLS[symbol_key]
 
 
 # ─── GIST HELPERS ─────────────────────────────────────────────────────────────
@@ -119,19 +155,21 @@ def send_telegram(text: str):
 
 
 # ─── MARKET DATA ──────────────────────────────────────────────────────────────
-def fetch_ohlcv(outputsize=100) -> list[dict]:
+def fetch_ohlcv(cfg: dict, outputsize=100) -> list[dict]:
     url = "https://api.twelvedata.com/time_series"
     params = {
-        "symbol": SYMBOL,
+        "symbol": cfg["td_symbol"],
         "interval": INTERVAL,
         "outputsize": outputsize,
         "apikey": TWELVEDATA_API_KEY,
     }
+    if cfg.get("td_exchange"):
+        params["exchange"] = cfg["td_exchange"]
     r = requests.get(url, params=params, timeout=15)
     r.raise_for_status()
     data = r.json()
     if "values" not in data:
-        raise ValueError(f"TwelveData error: {data}")
+        raise ValueError(f"TwelveData error [{cfg['display']}]: {data}")
     # Diurutkan dari terlama ke terbaru
     return list(reversed(data["values"]))
 
@@ -184,7 +222,7 @@ def atr(candles: list[dict], period: int = 14) -> float:
 
 
 # ─── SCORING ──────────────────────────────────────────────────────────────────
-def compute_signal(candles: list[dict]) -> dict:
+def compute_signal(cfg: dict, candles: list[dict]) -> dict:
     closes = [float(c["close"]) for c in candles]
     price  = closes[-1]
 
@@ -247,8 +285,8 @@ def compute_signal(candles: list[dict]) -> dict:
         direction = "WAIT"
         score = max(score_buy, score_sell)
 
-    sl = atr_val * 1.5
-    tp = atr_val * 3.0
+    sl = atr_val * cfg["atr_sl_mult"]
+    tp = atr_val * cfg["atr_tp_mult"]
 
     return {
         "direction": direction,
@@ -271,24 +309,26 @@ def compute_signal(candles: list[dict]) -> dict:
 
 
 # ─── ALERT SIGNAL (mode default) ──────────────────────────────────────────────
-def run_alert():
+def run_alert(cfg: dict):
     now_utc = datetime.now(timezone.utc)
-    if now_utc.weekday() >= 5:
-        print("Weekend — skip")
-        return
-    if not (7 <= now_utc.hour < 21):
-        print("Outside market hours — skip")
-        return
 
-    candles = fetch_ohlcv(100)
-    sig     = compute_signal(candles)
-    state   = gist_read(GIST_FILENAME_STATE)
+    if not cfg["trades_24_7"]:
+        if now_utc.weekday() >= 5:
+            print(f"[{cfg['display']}] Weekend — skip")
+            return
+        if not (7 <= now_utc.hour < 21):
+            print(f"[{cfg['display']}] Outside market hours — skip")
+            return
+
+    candles = fetch_ohlcv(cfg, 100)
+    sig     = compute_signal(cfg, candles)
+    state   = gist_read(cfg["gist_state"])
 
     prev_direction = state.get("direction", "WAIT")
     prev_entry     = state.get("entry_price", sig["price"])
 
     direction_changed = sig["direction"] != prev_direction
-    price_moved       = abs(sig["price"] - prev_entry) >= PRICE_MOVE_THRESHOLD
+    price_moved       = abs(sig["price"] - prev_entry) >= cfg["price_move_threshold"]
     has_signal        = sig["direction"] in ("BUY", "SELL")
 
     should_alert = has_signal and (direction_changed or price_moved)
@@ -300,7 +340,7 @@ def run_alert():
     if should_alert:
         emoji = "🟢" if sig["direction"] == "BUY" else "🔴"
         msg = (
-            f"{emoji} <b>XAU/USD Signal: {sig['direction']}</b>\n"
+            f"{emoji} {cfg['asset_emoji']} <b>{cfg['display']} Signal: {sig['direction']}</b>\n"
             f"━━━━━━━━━━━━━━\n"
             f"💰 Price : <b>${sig['price']}</b>\n"
             f"📊 Score : {sig['score']}/10\n"
@@ -312,10 +352,10 @@ def run_alert():
             f"⏰ {wib_time_str} WIB"
         )
         send_telegram(msg)
-        print(f"Alert sent: {sig['direction']} @ {sig['price']}")
+        print(f"[{cfg['display']}] Alert sent: {sig['direction']} @ {sig['price']}")
 
     else:
-        print(f"No alert: {sig['direction']} score={sig['score']} price={sig['price']}")
+        print(f"[{cfg['display']}] No alert: {sig['direction']} score={sig['score']} price={sig['price']}")
 
     # ✅ FIX 409: Gabung state + history dalam SATU gist_write_multi call
     new_state = {
@@ -325,21 +365,21 @@ def run_alert():
         "last_checked": sig["timestamp"],
         "alerted": should_alert,
     }
-    updated_history = _build_history_update(sig, alerted=should_alert)
+    updated_history = _build_history_update(cfg, sig, alerted=should_alert)
 
     if updated_history is not None:
         # Tulis state + history sekaligus → satu PATCH request
         gist_write_multi({
-            GIST_FILENAME_STATE: new_state,
-            GIST_FILENAME_HISTORY: updated_history,
+            cfg["gist_state"]: new_state,
+            cfg["gist_history"]: updated_history,
         })
     else:
         # History di-throttle, tulis state saja
-        gist_write(GIST_FILENAME_STATE, new_state)
+        gist_write(cfg["gist_state"], new_state)
 
 
 # ─── HISTORY HELPER ───────────────────────────────────────────────────────────
-def _build_history_update(sig: dict, alerted: bool) -> dict | None:
+def _build_history_update(cfg: dict, sig: dict, alerted: bool) -> dict | None:
     """
     Bangun dict history yang sudah diupdate.
     Return None jika throttled (tidak perlu write).
@@ -350,14 +390,14 @@ def _build_history_update(sig: dict, alerted: bool) -> dict | None:
     if not alerted:
         # Throttle: simpan tiap 10 menit (menit 0,10,20,30,40,50)
         if now_utc.minute % 10 not in range(0, 3):
-            print(f"History throttled (non-alert) — skip write")
+            print(f"[{cfg['display']}] History throttled (non-alert) — skip write")
             return None
 
     wib_now    = now_utc.astimezone(WIB)
     today      = wib_now.strftime("%Y-%m-%d")   # tanggal WIB
     time_str   = wib_now.strftime("%H:%M")       # jam WIB
 
-    history = gist_read(GIST_FILENAME_HISTORY)
+    history = gist_read(cfg["gist_history"])
 
     if today not in history:
         history[today] = []
@@ -381,26 +421,26 @@ def _build_history_update(sig: dict, alerted: bool) -> dict | None:
 
 
 # ─── DAILY SUMMARY (mode baru) ────────────────────────────────────────────────
-def run_daily_summary():
+def run_daily_summary(cfg: dict):
     """
     Mode daily summary: baca history hari ini dari Gist, hitung stats,
     kirim rekap ke Telegram. Dipanggil jam 21:00 UTC (= 04:00 WIB besok).
     History key sudah dalam WIB, jadi pakai today WIB.
     """
     today = now_wib().strftime("%Y-%m-%d")   # ← WIB date
-    history = gist_read(GIST_FILENAME_HISTORY)
+    history = gist_read(cfg["gist_history"])
     entries = history.get(today, [])
 
     # Ambil harga penutup saat ini untuk referensi
     try:
-        candles = fetch_ohlcv(5)
+        candles = fetch_ohlcv(cfg, 5)
         current_price = float(candles[-1]["close"])
     except Exception:
         current_price = None
 
     if not entries:
         msg = (
-            f"📋 <b>XAU/USD Daily Summary</b>\n"
+            f"📋 {cfg['asset_emoji']} <b>{cfg['display']} Daily Summary</b>\n"
             f"📅 {today} | Close London Session\n"
             f"━━━━━━━━━━━━━━\n"
             f"Tidak ada sinyal aktif hari ini.\n"
@@ -408,7 +448,7 @@ def run_daily_summary():
         if current_price:
             msg += f"💰 Harga penutup : <b>${current_price:,.2f}</b>"
         send_telegram(msg)
-        print("Daily summary sent: no signals today")
+        print(f"[{cfg['display']}] Daily summary sent: no signals today")
         return
 
     # Hitung statistik
@@ -458,7 +498,7 @@ def run_daily_summary():
     timeline_str = "\n".join(timeline_lines)
 
     msg = (
-        f"📊 <b>XAU/USD Daily Summary</b>\n"
+        f"📊 {cfg['asset_emoji']} <b>{cfg['display']} Daily Summary</b>\n"
         f"📅 {today} | London Close 04:00 WIB\n"
         f"━━━━━━━━━━━━━━\n"
         f"{bias_emoji} <b>Bias Hari Ini: {dominant}</b> ({dominant_pct}%)\n"
@@ -484,27 +524,35 @@ def run_daily_summary():
     )
 
     send_telegram(msg)
-    print(f"Daily summary sent: {total} entries, dominant={dominant}")
+    print(f"[{cfg['display']}] Daily summary sent: {total} entries, dominant={dominant}")
 
     # Reset history hari ini setelah summary dikirim (opsional)
     # Hapus hari ini dari history supaya besok fresh
     # history.pop(today, None)
-    # gist_write(GIST_FILENAME_HISTORY, history)
+    # gist_write(cfg["gist_history"], history)
     # — Dikomentari dulu, bisa diaktifkan jika mau auto-reset
 
 
 # ─── ENTRYPOINT ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="XAU/USD Signal Engine v3.0")
+    parser = argparse.ArgumentParser(description="Multi-Asset Signal Engine v3.1")
     parser.add_argument(
         "--mode",
         choices=["alert", "daily-summary"],
         default="alert",
         help="Mode: 'alert' (default) atau 'daily-summary'",
     )
+    parser.add_argument(
+        "--symbol",
+        choices=list(SYMBOLS.keys()),
+        default="xau",
+        help="Symbol: 'xau' (default, XAU/USD) atau 'btc' (BTC/USD via Binance)",
+    )
     args = parser.parse_args()
 
+    symbol_cfg = get_symbol_config(args.symbol)
+
     if args.mode == "daily-summary":
-        run_daily_summary()
+        run_daily_summary(symbol_cfg)
     else:
-        run_alert()
+        run_alert(symbol_cfg)
