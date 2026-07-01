@@ -416,7 +416,7 @@ def _build_history_update(cfg: dict, sig: dict, alerted: bool) -> dict | None:
     if today not in history:
         history[today] = []
 
-    history[today].append({
+    history[today].insert(0, {
         "time": time_str,
         "direction": sig["direction"],
         "price": sig["price"],
@@ -427,7 +427,9 @@ def _build_history_update(cfg: dict, sig: dict, alerted: bool) -> dict | None:
         "alerted": alerted,
     })
 
-    history[today] = history[today][-50:]
+    # Newest-first: entry terbaru selalu di index 0. Ambil 50 TERBARU
+    # (bukan 50 terakhir dari urutan lama) → slice dari depan.
+    history[today] = history[today][:50]
     cutoff = (wib_now - timedelta(days=7)).strftime("%Y-%m-%d")
     history = {k: v for k, v in history.items() if k >= cutoff}
 
@@ -486,9 +488,10 @@ def run_daily_summary(cfg: dict):
         )
         bias_emoji = "🟢" if dominant == "BUY" else "🔴"
 
-    # First dan last entry
-    first = entries[0]
-    last  = entries[-1]
+    # entries sekarang newest-first (index 0 = paling baru)
+    # → first entry kronologis = paling akhir di list, last entry = index 0
+    first = entries[-1]
+    last  = entries[0]
 
     # Average score
     avg_score = round(sum(e["score"] for e in entries) / total, 1)
@@ -502,8 +505,8 @@ def run_daily_summary(cfg: dict):
     def dir_emoji(d):
         return "🟢" if d == "BUY" else ("🔴" if d == "SELL" else "⚪")
 
-    # Format signal timeline (max 5 terakhir)
-    timeline_entries = entries[-5:] if len(entries) > 5 else entries
+    # Format signal timeline (5 terbaru, urutan newest-first — sama dengan Gist)
+    timeline_entries = entries[:5]
     timeline_lines = []
     for e in timeline_entries:
         timeline_lines.append(
