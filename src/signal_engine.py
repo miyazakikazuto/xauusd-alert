@@ -1,10 +1,19 @@
 """
-Multi-Asset Signal Engine v3.1
+Multi-Asset Signal Engine v3.2
 - v2.0: state persistence via Gist, anti-spam logic
 - v3.0: tambah --mode daily-summary untuk rekap harian jam 21:00 UTC
 - v3.1: config-driven multi-symbol (XAU/USD + BTC/USD via Binance),
         per-symbol ATR multiplier, per-symbol Gist state key,
         24/7 market hours untuk crypto
+- v3.2: INTERVAL 5min → 15min (latensi cron ±10 menit membuat M5 tidak
+        andal — window trigger bisa melompati satu candle penuh di M5,
+        tapi masih di dalam satu candle yang sama di M15); RSI & Bollinger
+        Bands diubah dari sinyal kontrarian independen menjadi timing
+        signal yang di-gate oleh trend_bias (EMA9/21/50) — mencegah
+        sistem "menangkap pisau jatuh" (mis. BUY saat RSI oversold di
+        tengah downtrend kuat). Lihat README bagian "Aturan Entry" untuk
+        spesifikasi skor lengkap — kode ini WAJIB selalu match dengan
+        spek di README tersebut.
 """
 
 import os
@@ -35,7 +44,7 @@ TWELVEDATA_API_KEY = os.environ["TWELVEDATA_API_KEY"]
 STATE_GIST_ID      = os.environ["STATE_GIST_ID"]
 GH_PAT_GIST        = os.environ["GH_PAT_GIST"]
 
-INTERVAL   = "5min"
+INTERVAL   = "15min"
 EMA_FAST   = 9
 EMA_MID    = 21
 EMA_SLOW   = 50
@@ -242,36 +251,48 @@ def compute_signal(cfg: dict, candles: list[dict]) -> dict:
     score_buy  = 0
     score_sell = 0
 
-    # EMA trend
+    # ─── TREND BIAS (gerbang arah) ──────────────────────────────────────────
+    # trend_bias dihitung SEKALI dari EMA stack, lalu dipakai sebagai gate
+    # untuk RSI & Bollinger di bawah. Ini satu-satunya sumber kebenaran arah
+    # trend — jangan duplikasi logika "naik/turun" di indikator lain.
     if price > ema9 > ema21 > ema50:
-        score_buy += 3
+        trend_bias = "up"
     elif price < ema9 < ema21 < ema50:
+        trend_bias = "down"
+    else:
+        trend_bias = "neutral"
+
+    # EMA trend (kontribusi skor arah)
+    if trend_bias == "up":
+        score_buy += 3
+    elif trend_bias == "down":
         score_sell += 3
     elif ema9 > ema21:
         score_buy += 1
     elif ema9 < ema21:
         score_sell += 1
 
-    # RSI
-    if rsi_val < 30:
+    # RSI — TIMING signal, bukan kontrarian independen.
+    # RSI dip hanya dihitung sebagai skor BUY kalau trend_bias != "down"
+    # (dip di dalam uptrend/netral). RSI rally hanya skor SELL kalau
+    # trend_bias != "up". Kalau trend_bias berlawanan arah dengan RSI,
+    # sinyal diabaikan sepenuhnya — tidak menyumbang skor ke arah mana pun.
+    if rsi_val < 40 and trend_bias != "down":
         score_buy += 2
-    elif rsi_val > 70:
+    elif rsi_val > 60 and trend_bias != "up":
         score_sell += 2
-    elif rsi_val < 50:
-        score_buy += 1
-    else:
-        score_sell += 1
 
-    # MACD
+    # MACD — konfirmasi momentum, tidak di-gate (independen dari trend_bias
+    # by design, karena MACD sendiri sudah mengukur arah momentum).
     if macd_line > macd_signal and macd_hist > 0:
         score_buy += 2
     elif macd_line < macd_signal and macd_hist < 0:
         score_sell += 2
 
-    # Bollinger
-    if price <= bb_lower:
+    # Bollinger Bands — TIMING signal, sama seperti RSI, di-gate trend_bias.
+    if price <= bb_lower and trend_bias != "down":
         score_buy += 2
-    elif price >= bb_upper:
+    elif price >= bb_upper and trend_bias != "up":
         score_sell += 2
 
     # Determine signal
@@ -290,6 +311,7 @@ def compute_signal(cfg: dict, candles: list[dict]) -> dict:
 
     return {
         "direction": direction,
+        "trend_bias": trend_bias,
         "score": score,
         "score_buy": score_buy,
         "score_sell": score_sell,
@@ -344,6 +366,7 @@ def run_alert(cfg: dict):
             f"━━━━━━━━━━━━━━\n"
             f"💰 Price : <b>${sig['price']}</b>\n"
             f"📊 Score : {sig['score']}/10\n"
+            f"🧭 Trend : {sig['trend_bias']}\n"
             f"📈 RSI   : {sig['rsi']}\n"
             f"📉 MACD  : {sig['macd_hist']:+.4f}\n"
             f"━━━━━━━━━━━━━━\n"
@@ -419,6 +442,7 @@ def _build_history_update(cfg: dict, sig: dict, alerted: bool) -> dict | None:
     history[today].insert(0, {
         "time": time_str,
         "direction": sig["direction"],
+        "trend_bias": sig["trend_bias"],
         "price": sig["price"],
         "score": sig["score"],
         "rsi": sig["rsi"],
