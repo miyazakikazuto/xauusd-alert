@@ -1,4 +1,4 @@
-name: Multi-Asset Alert System v3.1
+name: Multi-Asset Alert System v3.2
 
 on:
   workflow_dispatch:
@@ -7,6 +7,10 @@ on:
         description: 'Mode: alert atau daily-summary'
         required: false
         default: 'alert'
+        type: choice
+        options:
+          - alert
+          - daily-summary
       symbol:
         description: 'Symbol: xau atau btc'
         required: false
@@ -16,11 +20,20 @@ on:
           - xau
           - btc
 
+concurrency:
+  # Kunci per-symbol: signal-alert dan daily-summary untuk symbol yang sama
+  # tidak akan pernah menulis ke Gist secara bersamaan. Run baru MENUNGGU
+  # (bukan cancel) run lama selesai — supaya tidak ada alert yang terpotong
+  # di tengah proses.
+  group: signal-engine-${{ github.event.inputs.symbol || 'xau' }}
+  cancel-in-progress: false
+
 jobs:
   # ─── JOB 1: Signal Alert (dipicu oleh cron-job.org setiap 10 menit) ────────
   signal-alert:
     name: Signal Alert
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: ${{ github.event.inputs.mode == 'alert' || github.event.inputs.mode == '' }}
 
     steps:
@@ -48,6 +61,7 @@ jobs:
   daily-summary:
     name: Daily Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: ${{ github.event.inputs.mode == 'daily-summary' }}
 
     steps:
