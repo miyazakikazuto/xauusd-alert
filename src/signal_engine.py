@@ -5,12 +5,15 @@ Multi-Asset Signal Engine v3.2
 - v3.1: config-driven multi-symbol (XAU/USD + BTC/USD via Binance),
         per-symbol ATR multiplier, per-symbol Gist state key,
         24/7 market hours untuk crypto
-- v3.2: interval 5min → 15min (selaras dengan latensi cron 10 menit &
-        rasio spread/ATR yang lebih sehat untuk eksekusi manual);
-        RSI & Bollinger tidak lagi jadi sinyal kontrarian independen —
-        sekarang bergerbang oleh trend_bias (EMA9/21/50) sebagai TIMING
-        entry searah trend ("buy the dip / sell the rally"), bukan
-        mean-reversion murni yang bisa berlawanan dengan trend besar.
+- v3.2: INTERVAL 5min → 15min (latensi cron ±10 menit membuat M5 tidak
+        andal — window trigger bisa melompati satu candle penuh di M5,
+        tapi masih di dalam satu candle yang sama di M15); RSI & Bollinger
+        Bands diubah dari sinyal kontrarian independen menjadi timing
+        signal yang di-gate oleh trend_bias (EMA9/21/50) — mencegah
+        sistem "menangkap pisau jatuh" (mis. BUY saat RSI oversold di
+        tengah downtrend kuat). Lihat README bagian "Aturan Entry" untuk
+        spesifikasi skor lengkap — kode ini WAJIB selalu match dengan
+        spek di README tersebut.
 """
 
 import os
@@ -248,50 +251,48 @@ def compute_signal(cfg: dict, candles: list[dict]) -> dict:
     score_buy  = 0
     score_sell = 0
 
-    # EMA trend — ini yang jadi GERBANG ARAH untuk RSI & Bollinger di bawah.
-    # trend_bias menjawab pertanyaan "arus besar sedang ke mana?" sebelum
-    # indikator lain diizinkan mengonfirmasi entry.
-    if ema9 > ema21 > ema50:
+    # ─── TREND BIAS (gerbang arah) ──────────────────────────────────────────
+    # trend_bias dihitung SEKALI dari EMA stack, lalu dipakai sebagai gate
+    # untuk RSI & Bollinger di bawah. Ini satu-satunya sumber kebenaran arah
+    # trend — jangan duplikasi logika "naik/turun" di indikator lain.
+    if price > ema9 > ema21 > ema50:
         trend_bias = "up"
-    elif ema9 < ema21 < ema50:
+    elif price < ema9 < ema21 < ema50:
         trend_bias = "down"
     else:
         trend_bias = "neutral"
 
-    if price > ema9 > ema21 > ema50:
+    # EMA trend (kontribusi skor arah)
+    if trend_bias == "up":
         score_buy += 3
-    elif price < ema9 < ema21 < ema50:
+    elif trend_bias == "down":
         score_sell += 3
     elif ema9 > ema21:
         score_buy += 1
     elif ema9 < ema21:
         score_sell += 1
 
-    # RSI — v3.2: bukan lagi sinyal kontrarian independen (RSI oversold
-    # dulunya bisa kasih skor BUY walau trend besar sedang turun kuat,
-    # berlawanan filosofi dengan EMA trend di atas).
-    # Sekarang RSI dip/rally hanya dipakai sebagai TIMING entry SEARAH
-    # trend_bias: "buy the dip" saat trend naik/netral, "sell the rally"
-    # saat trend turun/netral. Kalau trend_bias berlawanan arah, RSI
-    # ekstrem diabaikan sepenuhnya (tidak menyumbang skor ke arah mana pun)
-    # supaya sistem tidak menangkap pisau jatuh di tengah downtrend kuat.
-    if trend_bias != "down" and rsi_val < 40:
+    # RSI — TIMING signal, bukan kontrarian independen.
+    # RSI dip hanya dihitung sebagai skor BUY kalau trend_bias != "down"
+    # (dip di dalam uptrend/netral). RSI rally hanya skor SELL kalau
+    # trend_bias != "up". Kalau trend_bias berlawanan arah dengan RSI,
+    # sinyal diabaikan sepenuhnya — tidak menyumbang skor ke arah mana pun.
+    if rsi_val < 40 and trend_bias != "down":
         score_buy += 2
-    elif trend_bias != "up" and rsi_val > 60:
+    elif rsi_val > 60 and trend_bias != "up":
         score_sell += 2
 
-    # MACD
+    # MACD — konfirmasi momentum, tidak di-gate (independen dari trend_bias
+    # by design, karena MACD sendiri sudah mengukur arah momentum).
     if macd_line > macd_signal and macd_hist > 0:
         score_buy += 2
     elif macd_line < macd_signal and macd_hist < 0:
         score_sell += 2
 
-    # Bollinger — perlakuan sama seperti RSI: sentuhan band ekstrem cuma
-    # valid sebagai titik masuk kalau searah trend_bias, bukan mean-
-    # reversion murni yang bisa melawan arus besar.
-    if trend_bias != "down" and price <= bb_lower:
+    # Bollinger Bands — TIMING signal, sama seperti RSI, di-gate trend_bias.
+    if price <= bb_lower and trend_bias != "down":
         score_buy += 2
-    elif trend_bias != "up" and price >= bb_upper:
+    elif price >= bb_upper and trend_bias != "up":
         score_sell += 2
 
     # Determine signal
@@ -310,6 +311,7 @@ def compute_signal(cfg: dict, candles: list[dict]) -> dict:
 
     return {
         "direction": direction,
+        "trend_bias": trend_bias,
         "score": score,
         "score_buy": score_buy,
         "score_sell": score_sell,
@@ -364,6 +366,7 @@ def run_alert(cfg: dict):
             f"━━━━━━━━━━━━━━\n"
             f"💰 Price : <b>${sig['price']}</b>\n"
             f"📊 Score : {sig['score']}/10\n"
+            f"🧭 Trend : {sig['trend_bias']}\n"
             f"📈 RSI   : {sig['rsi']}\n"
             f"📉 MACD  : {sig['macd_hist']:+.4f}\n"
             f"━━━━━━━━━━━━━━\n"
@@ -439,6 +442,7 @@ def _build_history_update(cfg: dict, sig: dict, alerted: bool) -> dict | None:
     history[today].insert(0, {
         "time": time_str,
         "direction": sig["direction"],
+        "trend_bias": sig["trend_bias"],
         "price": sig["price"],
         "score": sig["score"],
         "rsi": sig["rsi"],
@@ -572,7 +576,7 @@ def run_daily_summary(cfg: dict):
 
 # ─── ENTRYPOINT ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Multi-Asset Signal Engine v3.2")
+    parser = argparse.ArgumentParser(description="Multi-Asset Signal Engine v3.1")
     parser.add_argument(
         "--mode",
         choices=["alert", "daily-summary"],
